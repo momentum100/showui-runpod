@@ -69,9 +69,13 @@ def inference(image, query):
         if torch.cuda.is_available() and showui_model.device.type != 'cuda':
             showui_model.to("cuda")
 
+        # Use the processor to generate the text prompt only
+        text_prompt = showui_processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
+        # Prepare inputs for the model, including the processed image
         inputs = showui_processor(
-            messages,
-            images=[image],
+            text=text_prompt,
+            images=image,  # Pass the processed image directly here
             return_tensors="pt",
         )
 
@@ -94,10 +98,14 @@ def inference(image, query):
             logger.error(f"Invalid coordinate format: {click_xy}")
             return {"error": f"Invalid coordinate format: {click_xy}"}
 
-        return {
+        result = {
             "coordinates": click_xy,
             "debug_output": output_text,
         }
+
+        logger.info(f"Inference result: {result}")  # Log the complete output dictionary
+
+        return result
 
     except Exception as e:
         logger.error(f"Inference error: {e}")
