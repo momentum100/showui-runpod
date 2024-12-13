@@ -6,27 +6,17 @@ import base64
 import os
 import ast
 from dotenv import load_dotenv
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor, Qwen2VLForConditionalGeneration
 
 load_dotenv()
 
 # --- Model Loading (Optimized) ---
-QWENVL_MODEL_ID = "Qwen/Qwen-VL-Chat"
 SHOWUI_MODEL_ID = "showlab/ShowUI-2B"
 
 try:
-    # Load Qwen-VL-Chat first
-    qwen_processor = AutoProcessor.from_pretrained(QWENVL_MODEL_ID, trust_remote_code=True)
-    qwen_model = AutoModelForCausalLM.from_pretrained(
-        QWENVL_MODEL_ID,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True
-    ).eval()
-
-    # Load ShowUI on top of Qwen
+    # Load ShowUI
     showui_processor = AutoProcessor.from_pretrained(SHOWUI_MODEL_ID, trust_remote_code=True)
-    showui_model = AutoModelForCausalLM.from_pretrained(
+    showui_model = Qwen2VLForConditionalGeneration.from_pretrained(
         SHOWUI_MODEL_ID,
         torch_dtype=torch.bfloat16,
         device_map="auto",
