@@ -53,7 +53,7 @@ def inference(image, query):
         _SYSTEM = "Based on the screenshot of the page, I give a text description and you give its corresponding location. The coordinate represents a clickable location [x, y] for an element, which is a relative coordinate on the screenshot, scaled from 0 to 1."
         min_pixels = 256 * 28 * 28
         max_pixels = 1344 * 28 * 28
-        dummy_image_name = "image.png"  # Placeholder filename
+        dummy_image_name = "image.png"
 
         messages = [
             {
@@ -61,7 +61,7 @@ def inference(image, query):
                 "content": [
                     {"type": "text", "text": _SYSTEM},
                     {"type": "image", "image": dummy_image_name, "min_pixels": min_pixels, "max_pixels": max_pixels},
-                    {"type": "text", "text": query},  # User's query about location
+                    {"type": "text", "text": query},
                 ],
             }
         ]
@@ -69,13 +69,20 @@ def inference(image, query):
         if torch.cuda.is_available() and showui_model.device.type != 'cuda':
             showui_model.to("cuda")
 
-        # Process text and images separately
-        text_prompt = showui_processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        inputs = showui_processor(text=text_prompt, return_tensors="pt")
-        image_inputs = showui_processor(images=image, return_tensors="pt")["pixel_values"]
+        # Use the processor to generate the formatted input dictionary
+        text_and_image_dict = showui_processor.apply_chat_template(
+            messages, 
+            add_generation_prompt=True, 
+            tokenize=False
+        )
+        
+        text_and_image_dict['images'] = [image]
 
-        # Combine inputs
-        inputs["pixel_values"] = image_inputs
+        # Prepare inputs for the model using the dictionary
+        inputs = showui_processor(
+            **text_and_image_dict,  # Pass the dictionary directly using **
+            return_tensors="pt",
+        )
 
         if torch.cuda.is_available():
             inputs = inputs.to("cuda", torch.bfloat16)
@@ -86,7 +93,6 @@ def inference(image, query):
             generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
 
-        # Extract coordinates using ast.literal_eval
         try:
             click_xy = ast.literal_eval(output_text)
         except (ValueError, SyntaxError) as e:
