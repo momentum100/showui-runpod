@@ -15,24 +15,28 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# --- Model Loading (Optimized) ---
 SHOWUI_MODEL_ID = "showlab/ShowUI-2B"
 
 try:
-    # Load ShowUI
-    showui_processor = AutoProcessor.from_pretrained(SHOWUI_MODEL_ID, trust_remote_code=True)
-    showui_model = Qwen2VLForConditionalGeneration.from_pretrained(
+    # Load model and processor
+    processor = AutoProcessor.from_pretrained(SHOWUI_MODEL_ID, trust_remote_code=True)
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
         SHOWUI_MODEL_ID,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True
     )
-
 except Exception as e:
-    logger.error(f"Error loading models: {e}")
+    logger.error(f"Error loading model or processor: {e}")
     raise
 
-# --- Image Preprocessing ---
+# Set a chat template before using apply_chat_template()
+processor.chat_template = {
+    "system": "<|System|>{content}</s>",
+    "user": "<|User|>{content}</s>",
+    "assistant": "<|Assistant|>{content}</s>"
+}
+
 def preprocess_image(image_base64):
     try:
         image_data = base64.b64decode(image_base64)
@@ -42,54 +46,46 @@ def preprocess_image(image_base64):
         logger.error(f"Error in image preprocessing: {e}")
         return None
 
-# --- Inference Function ---
-def inference(image, query):
+def inference(image, system_prompt, query, img_url):
     if image is None:
         logger.error("Image preprocessing failed")
         return {"error": "Image preprocessing failed"}
 
     try:
-        # --- UI Grounding Prompt ---
-        _SYSTEM = "Based on the screenshot of the page, I give a text description and you give its corresponding location. The coordinate represents a clickable location [x, y] for an element, which is a relative coordinate on the screenshot, scaled from 0 to 1."
         min_pixels = 256 * 28 * 28
         max_pixels = 1344 * 28 * 28
-        dummy_image_name = "image.png"
 
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": _SYSTEM},
-                    {"type": "image", "image": dummy_image_name, "min_pixels": min_pixels, "max_pixels": max_pixels},
-                    {"type": "text", "text": query},
+                    {"type": "text", "text": system_prompt},
+                    {"type": "text", "text": f'Task: {query}'},
+                    {"type": "image", "image": img_url, "min_pixels": min_pixels, "max_pixels": max_pixels},
                 ],
             }
         ]
 
-        if torch.cuda.is_available() and showui_model.device.type != 'cuda':
-            showui_model.to("cuda")
+        if torch.cuda.is_available() and model.device.type != 'cuda':
+            model.to("cuda")
 
-        # Use the processor to generate the formatted input dictionary
-        text_and_image_dict = showui_processor.apply_chat_template(
+        # Prepare the chat input using the processor
+        text_dict = processor.apply_chat_template(
             messages, 
-            add_generation_prompt=True, 
-            tokenize=False
+            tokenize=False, 
+            add_generation_prompt=True
         )
-        
-        text_and_image_dict['images'] = [image]
 
-        # Prepare inputs for the model using the dictionary
-        inputs = showui_processor(
-            **text_and_image_dict,  # Pass the dictionary directly using **
-            return_tensors="pt",
-        )
+        # The returned dictionary doesn't include the actual image data, so we add it
+        text_dict['images'] = [image]
+
+        inputs = processor(**text_dict, return_tensors="pt")
 
         if torch.cuda.is_available():
             inputs = inputs.to("cuda", torch.bfloat16)
 
-        generated_ids = showui_model.generate(**inputs, max_new_tokens=128)
-
-        output_text = showui_processor.batch_decode(
+        generated_ids = model.generate(**inputs, max_new_tokens=128)
+        output_text = processor.batch_decode(
             generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
 
@@ -109,19 +105,19 @@ def inference(image, query):
         }
 
         logger.info(f"Inference result: {result}")
-
         return result
 
     except Exception as e:
         logger.error(f"Inference error: {e}")
         return {"error": f"Inference error: {e}"}
 
-# --- RunPod Handler ---
 def handler(event):
     try:
         input_data = event['input']
         image_base64 = input_data.get('image')
         query = input_data.get('query')
+        system_prompt = input_data.get('system_prompt', "Based on the screenshot of the page, I give a text description and you give its corresponding location.")
+        img_url = "image.png" # Dummy image name referenced in content
 
         if not image_base64:
             logger.error("No image provided")
@@ -131,7 +127,7 @@ def handler(event):
             return {"error": "No query provided"}
 
         image = preprocess_image(image_base64)
-        result = inference(image, query)
+        result = inference(image, system_prompt, query, img_url)
         return result
 
     except Exception as e:
