@@ -5,8 +5,13 @@ import io
 import base64
 import os
 import ast
+import logging
 from dotenv import load_dotenv
-from transformers import AutoModelForCausalLM, AutoProcessor, Qwen2VLForConditionalGeneration
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -22,42 +27,56 @@ try:
         device_map="auto",
         trust_remote_code=True
     )
+
 except Exception as e:
-    print(f"Error loading models: {e}")
+    logger.error(f"Error loading models: {e}")
     raise
 
 # --- Image Preprocessing ---
 def preprocess_image(image_base64):
-    image_data = base64.b64decode(image_base64)
-    image = Image.open(io.BytesIO(image_data)).convert("RGB")
-    return image
+    try:
+        image_data = base64.b64decode(image_base64)
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        return image
+    except Exception as e:
+        logger.error(f"Error in image preprocessing: {e}")
+        return None
 
 # --- Inference Function ---
 def inference(image, query):
+    if image is None:
+        logger.error("Image preprocessing failed")
+        return {"error": "Image preprocessing failed"}
+
     try:
         # --- UI Grounding Prompt ---
         _SYSTEM = "Based on the screenshot of the page, I give a text description and you give its corresponding location. The coordinate represents a clickable location [x, y] for an element, which is a relative coordinate on the screenshot, scaled from 0 to 1."
+        min_pixels = 256 * 28 * 28
+        max_pixels = 1344 * 28 * 28
+        dummy_image_name = "image.png"
 
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": _SYSTEM},
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": query},  # User's query about location
+                    {"type": "image", "image": dummy_image_name, "min_pixels": min_pixels, "max_pixels": max_pixels},
+                    {"type": "text", "text": query},
                 ],
             }
         ]
 
-        text = showui_processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        if torch.cuda.is_available() and showui_model.device.type != 'cuda':
+            showui_model.to("cuda")
 
         inputs = showui_processor(
-            text=[text],
+            messages,
             images=[image],
             return_tensors="pt",
-        ).to("cuda", torch.bfloat16)
+        )
+
+        if torch.cuda.is_available():
+            inputs = inputs.to("cuda", torch.bfloat16)
 
         generated_ids = showui_model.generate(**inputs, max_new_tokens=128)
 
@@ -65,19 +84,24 @@ def inference(image, query):
             generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
 
-        # Extract coordinates using ast.literal_eval
         try:
-            click_xy = ast.literal_eval(output_text)  # Parse the output string as a Python literal
+            click_xy = ast.literal_eval(output_text)
         except (ValueError, SyntaxError) as e:
+            logger.error(f"Could not extract coordinates from output: {output_text}, Error: {e}")
             return {"error": f"Could not extract coordinates from output: {output_text}, Error: {e}"}
+
+        if not isinstance(click_xy, list) or len(click_xy) != 2:
+            logger.error(f"Invalid coordinate format: {click_xy}")
+            return {"error": f"Invalid coordinate format: {click_xy}"}
 
         return {
             "coordinates": click_xy,
-            "debug_output": output_text,  # For debugging purposes
+            "debug_output": output_text,
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Inference error: {e}")
+        return {"error": f"Inference error: {e}"}
 
 # --- RunPod Handler ---
 def handler(event):
@@ -87,15 +111,18 @@ def handler(event):
         query = input_data.get('query')
 
         if not image_base64:
+            logger.error("No image provided")
             return {"error": "No image provided"}
         if not query:
+            logger.error("No query provided")
             return {"error": "No query provided"}
 
         image = preprocess_image(image_base64)
-        result = inference(image, query)  # Pass the query to the inference function
+        result = inference(image, query)
         return result
 
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Handler error: {e}")
+        return {"error": f"Handler error: {e}"}
 
 runpod.serverless.start({"handler": handler})
