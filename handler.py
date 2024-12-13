@@ -1,10 +1,10 @@
 import runpod
 import torch
-from torchvision import transforms
 from PIL import Image
 import io
 import base64
 import os
+import ast
 from dotenv import load_dotenv
 from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -25,7 +25,7 @@ try:
     ).eval()
 
     # Load ShowUI on top of Qwen
-    showui_processor = qwen_processor # The same processor can be used
+    showui_processor = AutoProcessor.from_pretrained(SHOWUI_MODEL_ID, trust_remote_code=True)
     showui_model = AutoModelForCausalLM.from_pretrained(
         SHOWUI_MODEL_ID,
         torch_dtype=torch.bfloat16,
@@ -43,33 +43,49 @@ def preprocess_image(image_base64):
     return image
 
 # --- Inference Function ---
-def inference(image):
+def inference(image, query):
     try:
-        # Use the Qwen-VL-Chat model for initial processing
-        query = "What is this image about?" # Customize prompt as needed
-        inputs = qwen_processor(text=query, images=[image], return_tensors='pt').to("cuda", torch.bfloat16) # Qwen expects a list of images
-        
-        qwen_outputs = qwen_model.generate(**inputs, max_new_tokens=512)
-        qwen_response = qwen_processor.decode(qwen_outputs[0], skip_special_tokens=False)
+        # --- UI Grounding Prompt ---
+        _SYSTEM = "Based on the screenshot of the page, I give a text description and you give its corresponding location. The coordinate represents a clickable location [x, y] for an element, which is a relative coordinate on the screenshot, scaled from 0 to 1."
 
-        # Extract text and image from Qwen response for ShowUI input
-        extracted_text = qwen_response.split("<|im_end|>")[0].split("Assistant:")[1].strip()  # Adjust based on actual Qwen output
-        # The image remains the same, since it was already embedded by Qwen
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _SYSTEM},
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": query},  # User's query about location
+                ],
+            }
+        ]
 
-        # Feed the output into the ShowUI model
-        showui_inputs = showui_processor(
-            text=extracted_text + "[<IMG>]{{}}[/<IMG>]",  # Construct prompt for ShowUI
-            images=image,  # Use the original preprocessed image
+        text = showui_processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        inputs = showui_processor(
+            text=[text],
+            images=[image],
             return_tensors="pt",
         ).to("cuda", torch.bfloat16)
 
-        showui_outputs = showui_model.generate(**showui_inputs, max_new_tokens=512)
-        showui_response = showui_processor.batch_decode(showui_outputs, skip_special_tokens=True)[0].strip()
+        generated_ids = showui_model.generate(**inputs, max_new_tokens=128)
+
+        output_text = showui_processor.batch_decode(
+            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+
+        # Extract coordinates using ast.literal_eval
+        try:
+            click_xy = ast.literal_eval(output_text)  # Parse the output string as a Python literal
+        except (ValueError, SyntaxError) as e:
+            return {"error": f"Could not extract coordinates from output: {output_text}, Error: {e}"}
 
         return {
-            "qwen_response": qwen_response,  # Optionally, return the Qwen output
-            "showui_response": showui_response
+            "coordinates": click_xy,
+            "debug_output": output_text,  # For debugging purposes
         }
+
     except Exception as e:
         return {"error": str(e)}
 
@@ -78,12 +94,15 @@ def handler(event):
     try:
         input_data = event['input']
         image_base64 = input_data.get('image')
+        query = input_data.get('query')
 
         if not image_base64:
             return {"error": "No image provided"}
+        if not query:
+            return {"error": "No query provided"}
 
         image = preprocess_image(image_base64)
-        result = inference(image)
+        result = inference(image, query)  # Pass the query to the inference function
         return result
 
     except Exception as e:
