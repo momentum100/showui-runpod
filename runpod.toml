@@ -1,0 +1,10 @@
+[train]
+    worker_disk = 20  # Adjust disk space if needed
+    container_disk = 5
+    gpus = ["NVIDIA GeForce RTX 3090"] # Specify GPU type and number
+    gpu_count = 1
+    min_vcpu = 2  # Adjust as needed
+    min_memory = "8Gi" # Adjust as needed
+    runtime = "runpod/pytorch:2.0.1-py3.10-cuda11.8.0-devel"
+    api_key = "${env:RUNPOD_API_KEY}"
+    handler = "handler.py"

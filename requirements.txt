@@ -1,0 +1,10 @@
+runpod
+torch
+torchvision
+transformers
+sentencepiece
+accelerate
+bitsandbytes
+protobuf==3.20.*
+Pillow
+python-dotenv
